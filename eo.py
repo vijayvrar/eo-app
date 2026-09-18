@@ -12,12 +12,12 @@ from PIL import Image
 SESSION = None
 
 def get_onnx_session():
-    """Lazy loads ONNX session with single-threaded constraints for minimal RAM use."""
+    """Lazy-loads ONNX session with single-thread restriction to prevent high CPU load."""
     global SESSION
     if SESSION is None:
         onnx_path = os.path.join(os.path.dirname(__file__), "edsr.onnx")
         if not os.path.exists(onnx_path):
-            raise FileNotFoundError(f"Missing ONNX model weight file at {onnx_path}")
+            raise FileNotFoundError(f"CRITICAL: edsr.onnx weight file missing at {onnx_path}")
             
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 1
@@ -26,7 +26,7 @@ def get_onnx_session():
     return SESSION
 
 def apply_super_resolution_tiled(pil_img, tile_size=64):
-    """Runs true EDSR AI model over 64x64 patches to match local clarity without server crashes."""
+    """Processes image in fast 64x64 patches via ONNX Runtime."""
     session = get_onnx_session()
     
     img_np = np.array(pil_img.convert("RGB")).astype(np.float32) / 255.0
@@ -41,7 +41,6 @@ def apply_super_resolution_tiled(pil_img, tile_size=64):
             tile = img_np[y:y+tile_size, x:x+tile_size, :]
             th, tw, _ = tile.shape
 
-            # Pad boundary patches if necessary
             if th < tile_size or tw < tile_size:
                 padded_tile = np.zeros((tile_size, tile_size, c), dtype=np.float32)
                 padded_tile[:th, :tw, :] = tile
@@ -49,7 +48,6 @@ def apply_super_resolution_tiled(pil_img, tile_size=64):
 
             tile_tensor = np.transpose(tile, (2, 0, 1))[np.newaxis, ...]
             
-            # Execute ONNX forward pass
             input_name = session.get_inputs()[0].name
             sr_tile = session.run(None, {input_name: tile_tensor})[0][0]
             sr_tile = np.transpose(sr_tile, (1, 2, 0))
@@ -78,8 +76,8 @@ def get_satellite_image(latitude, longitude):
     item = items[0]
     assets = item.assets
     
-    # MATCHES LOCAL VIEWPORT: Expanded 512x512 crop (5.12km x 5.12km footprint)
-    crop_size = 512
+    # 256x256 crop window yields 2.56km x 2.56km scene coverage (Ideal balance for free tier CPU speed)
+    crop_size = 256
     half_crop = crop_size // 2
 
     with Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif"):
@@ -108,7 +106,7 @@ def get_satellite_image(latitude, longitude):
 
     pil_img = Image.fromarray(rgb_8bit)
 
-    # Save outputs
+    # Prepare save outputs
     out_dir = os.path.join("static", "outputs")
     os.makedirs(out_dir, exist_ok=True)
     
@@ -120,7 +118,7 @@ def get_satellite_image(latitude, longitude):
     native_path = os.path.join(out_dir, native_filename)
     pil_img.save(native_path)
 
-    # Execute Tiled Real ONNX AI Model (Yields sharp 2048x2048 enhanced scene)
+    # Execute Fast Tiled ONNX Model -> Sharp 1024x1024 Enhanced Scene
     sr_img = apply_super_resolution_tiled(pil_img)
     sr_path = os.path.join(out_dir, sr_filename)
     sr_img.save(sr_path)
