@@ -1,3 +1,4 @@
+# eo.py
 import os
 import numpy as np
 import rasterio
@@ -8,33 +9,51 @@ from rasterio.windows import Window
 from pystac_client import Client
 from PIL import Image
 
-# Initialize lightweight ONNX session (Uses < 150MB RAM)
 SESSION = None
 
 def get_onnx_session():
+    """Lazy load ONNX session to minimize startup RAM."""
     global SESSION
     if SESSION is None:
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
         SESSION = ort.InferenceSession("edsr.onnx", opts)
     return SESSION
 
-def apply_super_resolution(pil_img):
-    """Runs 4x EDSR AI inference via ONNX Runtime without PyTorch RAM overhead."""
+def apply_super_resolution_tiled(pil_img, tile_size=64):
+    """Processes image in 64x64 tiles to strictly respect Render's 512MB RAM cap."""
     session = get_onnx_session()
-    
-    # Pre-process image to float32 tensor [1, 3, H, W]
     img_np = np.array(pil_img).astype(np.float32) / 255.0
-    img_tensor = np.transpose(img_np, (2, 0, 1))[np.newaxis, ...]
+    h, w, c = img_np.shape
 
-    # Run AI inference
-    outputs = session.run(None, {"input": img_tensor})
-    output_tensor = outputs[0][0]
+    scale = 4
+    out_h, out_w = h * scale, w * scale
+    output_img = np.zeros((out_h, out_w, c), dtype=np.float32)
 
-    # Post-process array back to uint8 PIL image
-    output_np = np.transpose(output_tensor, (1, 2, 0))
-    output_np = np.clip(output_np * 255.0, 0, 255).astype(np.uint8)
-    
+    # Process via small patches
+    for y in range(0, h, tile_size):
+        for x in range(0, w, tile_size):
+            tile = img_np[y:y+tile_size, x:x+tile_size, :]
+            th, tw, _ = tile.shape
+
+            # Handle edge boundary padding
+            if th < tile_size or tw < tile_size:
+                padded_tile = np.zeros((tile_size, tile_size, c), dtype=np.float32)
+                padded_tile[:th, :tw, :] = tile
+                tile = padded_tile
+
+            tile_tensor = np.transpose(tile, (2, 0, 1))[np.newaxis, ...]
+            
+            # Execute ONNX model
+            sr_tile = session.run(None, {"input": tile_tensor})[0][0]
+            sr_tile = np.transpose(sr_tile, (1, 2, 0))
+
+            # Crop padding and assign to output array
+            sr_tile_valid = sr_tile[:th*scale, :tw*scale, :]
+            output_img[y*scale:(y+th)*scale, x*scale:(x+tw)*scale, :] = sr_tile_valid
+
+    output_np = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
     return Image.fromarray(output_np)
 
 def get_satellite_image(latitude, longitude):
@@ -54,7 +73,7 @@ def get_satellite_image(latitude, longitude):
 
     item = items[0]
     assets = item.assets
-    crop_size = 128  # 128x128 native patch converts to 512x512 2.5m AI output
+    crop_size = 128  # Yields 512x512 enhanced output
     half_crop = crop_size // 2
 
     with Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif"):
@@ -87,8 +106,8 @@ def get_satellite_image(latitude, longitude):
     native_path = "static/outputs/sentinel_10m.png"
     pil_img.save(native_path)
 
-    # Run ONNX AI Model
-    sr_img = apply_super_resolution(pil_img)
+    # Run Tiled ONNX Model
+    sr_img = apply_super_resolution_tiled(pil_img)
     sr_path = "static/outputs/sentinel_sr_2.5m.png"
     sr_img.save(sr_path)
 
