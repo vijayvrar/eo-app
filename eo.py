@@ -1,17 +1,41 @@
 import os
 import numpy as np
 import rasterio
+import onnxruntime as ort
 from rasterio.env import Env
 from rasterio.warp import transform
 from rasterio.windows import Window
 from pystac_client import Client
 from PIL import Image
 
+# Initialize lightweight ONNX session (Uses < 150MB RAM)
+SESSION = None
+
+def get_onnx_session():
+    global SESSION
+    if SESSION is None:
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 1
+        SESSION = ort.InferenceSession("edsr.onnx", opts)
+    return SESSION
+
 def apply_super_resolution(pil_img):
-    """Uses high-quality Lanczos resampling as a lightweight web fallback."""
-    width, height = pil_img.size
-    # 4x upscale without heavy PyTorch memory overhead
-    return pil_img.resize((width * 4, height * 4), Image.Resampling.LANCZOS)
+    """Runs 4x EDSR AI inference via ONNX Runtime without PyTorch RAM overhead."""
+    session = get_onnx_session()
+    
+    # Pre-process image to float32 tensor [1, 3, H, W]
+    img_np = np.array(pil_img).astype(np.float32) / 255.0
+    img_tensor = np.transpose(img_np, (2, 0, 1))[np.newaxis, ...]
+
+    # Run AI inference
+    outputs = session.run(None, {"input": img_tensor})
+    output_tensor = outputs[0][0]
+
+    # Post-process array back to uint8 PIL image
+    output_np = np.transpose(output_tensor, (1, 2, 0))
+    output_np = np.clip(output_np * 255.0, 0, 255).astype(np.uint8)
+    
+    return Image.fromarray(output_np)
 
 def get_satellite_image(latitude, longitude):
     catalog = Client.open("https://earth-search.aws.element84.com/v1")
@@ -30,7 +54,7 @@ def get_satellite_image(latitude, longitude):
 
     item = items[0]
     assets = item.assets
-    crop_size = 128  # Compact window size for fast server response
+    crop_size = 128  # 128x128 native patch converts to 512x512 2.5m AI output
     half_crop = crop_size // 2
 
     with Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif"):
@@ -63,6 +87,7 @@ def get_satellite_image(latitude, longitude):
     native_path = "static/outputs/sentinel_10m.png"
     pil_img.save(native_path)
 
+    # Run ONNX AI Model
     sr_img = apply_super_resolution(pil_img)
     sr_path = "static/outputs/sentinel_sr_2.5m.png"
     sr_img.save(sr_path)
