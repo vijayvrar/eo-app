@@ -2,31 +2,65 @@ import os
 import uuid
 import numpy as np
 import rasterio
+import onnxruntime as ort
 from rasterio.env import Env
 from rasterio.warp import transform
 from rasterio.windows import Window
 from pystac_client import Client
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image
 
-def apply_dynamic_super_resolution(pil_img):
-    """
-    Executes real-time high-pass spatial feature reconstruction.
-    Upscales 4x while enhancing structural edges (buildings, roads) 
-    without triggering memory limits or 502 crashes on free hosting tiers.
-    """
-    w, h = pil_img.size
-    # 4x Spatial Upscaling via Lanczos resampling
-    upscaled = pil_img.resize((w * 4, h * 4), Image.Resampling.LANCZOS)
+SESSION = None
+
+def get_onnx_session():
+    """Lazy loads ONNX session with single-threaded constraints for minimal RAM use."""
+    global SESSION
+    if SESSION is None:
+        onnx_path = os.path.join(os.path.dirname(__file__), "edsr.onnx")
+        if not os.path.exists(onnx_path):
+            raise FileNotFoundError(f"Missing ONNX model weight file at {onnx_path}")
+            
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
+        SESSION = ort.InferenceSession(onnx_path, opts)
+    return SESSION
+
+def apply_super_resolution_tiled(pil_img, tile_size=64):
+    """Runs true EDSR AI model over 64x64 patches to match local clarity without server crashes."""
+    session = get_onnx_session()
     
-    # High-frequency structural feature enhancement
-    sharpened = upscaled.filter(ImageFilter.UnsharpMask(radius=2, percent=220, threshold=2))
-    
-    # Local contrast enhancement for crisp edge resolution
-    contrast = ImageEnhance.Contrast(sharpened)
-    return contrast.enhance(1.25)
+    img_np = np.array(pil_img.convert("RGB")).astype(np.float32) / 255.0
+    h, w, c = img_np.shape
+
+    scale = 4
+    out_h, out_w = h * scale, w * scale
+    output_img = np.zeros((out_h, out_w, c), dtype=np.float32)
+
+    for y in range(0, h, tile_size):
+        for x in range(0, w, tile_size):
+            tile = img_np[y:y+tile_size, x:x+tile_size, :]
+            th, tw, _ = tile.shape
+
+            # Pad boundary patches if necessary
+            if th < tile_size or tw < tile_size:
+                padded_tile = np.zeros((tile_size, tile_size, c), dtype=np.float32)
+                padded_tile[:th, :tw, :] = tile
+                tile = padded_tile
+
+            tile_tensor = np.transpose(tile, (2, 0, 1))[np.newaxis, ...]
+            
+            # Execute ONNX forward pass
+            input_name = session.get_inputs()[0].name
+            sr_tile = session.run(None, {input_name: tile_tensor})[0][0]
+            sr_tile = np.transpose(sr_tile, (1, 2, 0))
+
+            sr_tile_valid = sr_tile[:th*scale, :tw*scale, :]
+            output_img[y*scale:(y+th)*scale, x*scale:(x+tw)*scale, :] = sr_tile_valid
+
+    output_np = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
+    return Image.fromarray(output_np)
 
 def get_satellite_image(latitude, longitude):
-    print(f"Fetching live Sentinel-2 data for Lat: {latitude}, Lon: {longitude}")
     catalog = Client.open("https://earth-search.aws.element84.com/v1")
 
     search = catalog.search(
@@ -44,7 +78,8 @@ def get_satellite_image(latitude, longitude):
     item = items[0]
     assets = item.assets
     
-    crop_size = 256
+    # MATCHES LOCAL VIEWPORT: Expanded 512x512 crop (5.12km x 5.12km footprint)
+    crop_size = 512
     half_crop = crop_size // 2
 
     with Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif"):
@@ -64,7 +99,6 @@ def get_satellite_image(latitude, longitude):
         with rasterio.open(assets["blue"].href) as src:
             blue = src.read(1, window=window)
 
-    # Normalize RGB spectral bands
     rgb = np.dstack((red, green, blue)).astype(np.float32) / 10000.0
     low, high = np.percentile(rgb, (2, 98))
     if high <= low: 
@@ -74,21 +108,20 @@ def get_satellite_image(latitude, longitude):
 
     pil_img = Image.fromarray(rgb_8bit)
 
-    # Configure outputs directory
+    # Save outputs
     out_dir = os.path.join("static", "outputs")
     os.makedirs(out_dir, exist_ok=True)
     
-    # Generate unique filenames per request to avoid browser caching
     req_id = uuid.uuid4().hex[:8]
     native_filename = f"sentinel_10m_{req_id}.png"
     sr_filename = f"sentinel_2.5m_{req_id}.png"
 
-    # Save Native 10m Image
+    # Save Native 10m
     native_path = os.path.join(out_dir, native_filename)
     pil_img.save(native_path)
 
-    # Save Live Enhanced 2.5m Image
-    sr_img = apply_dynamic_super_resolution(pil_img)
+    # Execute Tiled Real ONNX AI Model (Yields sharp 2048x2048 enhanced scene)
+    sr_img = apply_super_resolution_tiled(pil_img)
     sr_path = os.path.join(out_dir, sr_filename)
     sr_img.save(sr_path)
 
