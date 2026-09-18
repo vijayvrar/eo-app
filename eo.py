@@ -1,6 +1,4 @@
 import os
-import gc
-import torch
 import numpy as np
 import rasterio
 from rasterio.env import Env
@@ -8,36 +6,12 @@ from rasterio.warp import transform
 from rasterio.windows import Window
 from pystac_client import Client
 from PIL import Image
-from super_image import EdsrModel, ImageLoader
-
-# Force PyTorch to use a single CPU thread to limit RAM spikes
-torch.set_num_threads(1)
 
 def apply_super_resolution(pil_img):
-    """Loads the model, runs inference, and immediately clears memory."""
-    try:
-        # Load model only when requested
-        model = EdsrModel.from_pretrained("eugenesiow/edsr-base", scale=4)
-        model.eval()
-
-        inputs = ImageLoader.load_image(pil_img)
-        
-        with torch.no_grad():
-            preds = model(inputs)
-
-        # Convert back to PIL Image
-        output_image = ImageLoader.to_image(preds)
-        
-        # Clean up RAM immediately
-        del model
-        del inputs
-        del preds
-        gc.collect()
-
-        return output_image
-    except Exception as e:
-        print(f"⚠️ Model inference failed, returning original: {e}")
-        return pil_img
+    """Uses high-quality Lanczos resampling as a lightweight web fallback."""
+    width, height = pil_img.size
+    # 4x upscale without heavy PyTorch memory overhead
+    return pil_img.resize((width * 4, height * 4), Image.Resampling.LANCZOS)
 
 def get_satellite_image(latitude, longitude):
     catalog = Client.open("https://earth-search.aws.element84.com/v1")
@@ -56,9 +30,7 @@ def get_satellite_image(latitude, longitude):
 
     item = items[0]
     assets = item.assets
-
-    # Downsize crop dimensions (e.g., 256x256 instead of 512x512) to stay well under RAM limits
-    crop_size = 256
+    crop_size = 128  # Compact window size for fast server response
     half_crop = crop_size // 2
 
     with Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif"):
@@ -78,7 +50,6 @@ def get_satellite_image(latitude, longitude):
         with rasterio.open(assets["blue"].href) as src:
             blue = src.read(1, window=window)
 
-    # Process RGB
     rgb = np.dstack((red, green, blue)).astype(np.float32) / 10000.0
     low, high = np.percentile(rgb, (2, 98))
     if high <= low: high = low + 1e-5
@@ -89,11 +60,9 @@ def get_satellite_image(latitude, longitude):
 
     os.makedirs("static/outputs", exist_ok=True)
     
-    # Save Native 10m
     native_path = "static/outputs/sentinel_10m.png"
     pil_img.save(native_path)
 
-    # Save 2.5m Super Resolution
     sr_img = apply_super_resolution(pil_img)
     sr_path = "static/outputs/sentinel_sr_2.5m.png"
     sr_img.save(sr_path)
