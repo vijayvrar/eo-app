@@ -1,0 +1,10 @@
+flask
+torch
+torchvision
+numpy
+rasterio
+pystac-client
+matplotlib
+Pillow
+super-image
+gunicorn

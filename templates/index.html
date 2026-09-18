@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Satellite Super-Resolution Suite (Mobile-Optimized)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        /* Container forces aspect-ratio and centers content */
+        .slider-container {
+            position: relative;
+            width: 100%;
+            max-width: 600px; /* Limits size on large desktops */
+            aspect-ratio: 1 / 1;
+            overflow: hidden;
+            border-radius: 0.75rem; /* Matches card rounded corner style */
+            border: 2px solid #334155; /* border-slate-700 */
+            user-select: none;
+            cursor: ew-resize; /* Shows 'east-west' resize cursor on hover */
+            
+            /* CRITICAL MOBILE FIX: prevents accidental page scrolling while swiping horizontally */
+            touch-action: pan-x; 
+        }
+
+        /* Standard image layers */
+        .slider-image-bottom {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .slider-image-top {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            /* Native initial split view */
+            clip-path: polygon(0 0, 50% 0, 50% 100%, 0 100%);
+        }
+
+        /* Replaces the tiny default HTML handle with a high-visibility, touch-friendly badge */
+        .slider-divider {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 50%;
+            width: 2px;
+            background-color: #38bdf8; /* sky-400 */
+            transform: translateX(-50%);
+            z-index: 10;
+        }
+
+        .slider-handle {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 44px; /* Increased size for better touch reliability */
+            height: 44px;
+            background-color: #0284c7; /* sky-600 */
+            border: 3px solid #38bdf8; /* sky-400 */
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 11;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 16px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
+            /* Visual feedback for interaction states */
+            transition: background-color 0.2s, border-color 0.2s;
+        }
+        
+        /* Active states when interacting */
+        .slider-container:active .slider-handle {
+            background-color: #38bdf8;
+            border-color: #f0f9ff; /* sky-50 */
+        }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col items-center p-4 md:p-6 antialiased">
+
+    <div class="w-full max-w-4xl space-y-6">
+        
+        <!-- Input Form (Responsive Layout) -->
+        <div class="bg-slate-800 border border-slate-700 rounded-xl p-5 md:p-6 shadow-xl">
+            <h1 class="text-xl md:text-2xl font-bold text-sky-400 mb-2 flex items-center gap-2">
+                🛰️ AI Satellite Observation
+            </h1>
+            <p class="text-slate-400 text-sm mb-6">
+                Sentinel-2 10m native vs. EDSR 2.5m super-resolution full-scene comparison.
+            </p>
+
+            <form method="POST" class="space-y-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs text-slate-400 mb-1">Latitude</label>
+                        <input type="text" name="latitude" placeholder="e.g. 13.08" required
+                            value="{{ result.latitude if result else '' }}"
+                            class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-sky-500">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-slate-400 mb-1">Longitude</label>
+                        <input type="text" name="longitude" placeholder="e.g. 80.27" required
+                            value="{{ result.longitude if result else '' }}"
+                            class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-sky-500">
+                    </div>
+                </div>
+
+                <button type="submit" 
+                    class="w-full bg-sky-600 hover:bg-sky-500 font-semibold py-3 rounded-lg transition-colors flex items-center justify-center gap-2">
+                    🔍 Fetch & Enhance Scene
+                </button>
+            </form>
+        </div>
+
+        {% if result %}
+        <!-- Full Area Interactive Slider View (Mobile-Optimized Layout) -->
+        <div class="bg-slate-800 border border-slate-700 rounded-xl p-5 md:p-6 shadow-xl space-y-4 flex flex-col items-center">
+            
+            <div class="w-full flex flex-col sm:flex-row sm:justify-between sm:items-center border-b border-slate-700 pb-3 gap-2">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-100">Full Scene Super-Resolution</h2>
+                    <p class="text-xs text-emerald-400 font-mono">Date: {{ result.observation }}</p>
+                </div>
+                <div class="flex gap-3 text-xs font-mono justify-center">
+                    <span class="text-sky-400">← 2.5m AI</span>
+                    <span class="text-slate-500">|</span>
+                    <span class="text-amber-400">10m Native →</span>
+                </div>
+            </div>
+
+            <!-- Custom Touch-Optimized Slider Stack -->
+            <div class="bg-slate-950 p-1 md:p-2 rounded-lg border border-slate-700 flex justify-center w-full">
+                <!-- Swiping anywhere on this container controls the slider -->
+                <div id="slider-root" class="slider-container">
+                    <!-- Layer 1: Native 10m (Bottom layer / Right Side reveal) -->
+                    <img src="{{ result.image_10m }}" class="slider-image-bottom" alt="Native 10m Scene">
+                    
+                    <!-- Layer 2: AI Enhanced 2.5m (Top layer / Left Side clipped) -->
+                    <img src="{{ result.image_2_5m }}" id="top-image" class="slider-image-top" alt="2.5m AI Scene">
+                    
+                    <!-- Visual Divider and Drag Handle -->
+                    <div id="slider-divider" class="slider-divider"></div>
+                    <div id="slider-handle" class="slider-handle">↔</div>
+                </div>
+            </div>
+
+            <p class="text-xs text-slate-400 text-center px-4">
+                Drag or swipe across the image to evaluate structural reconstruction and edge clarity.
+            </p>
+
+        </div>
+
+        <script>
+            // JS optimized specifically for high-performance touch and mouse tracking
+            document.addEventListener('DOMContentLoaded', () => {
+                const root = document.getElementById('slider-root');
+                const topImg = document.getElementById('top-image');
+                const divider = document.getElementById('slider-divider');
+                const handle = document.getElementById('slider-handle');
+
+                if (!root || !topImg || !divider || !handle) return;
+
+                // Tracking variable for interaction status
+                let isActive = false;
+
+                // Function updates CSS based on client position relative to container
+                const updateSlider = (clientX) => {
+                    if (!isActive) return;
+
+                    const rect = root.getBoundingClientRect();
+                    // Calculate pixel position relative to container, clamped [0, width]
+                    const positionX = Math.max(0, Math.min(rect.width, clientX - rect.left));
+                    // Convert to percentage
+                    const percentage = (positionX / rect.width) * 100;
+
+                    // Update DOM elements synchronously for maximum smooth interaction
+                    requestAnimationFrame(() => {
+                        topImg.style.clipPath = `polygon(0 0, ${percentage}% 0, ${percentage}% 100%, 0 100%)`;
+                        divider.style.left = `${percentage}%`;
+                        handle.style.left = `${percentage}%`;
+                    });
+                };
+
+                // Binds input events globally to catch 'off-container' release/drag
+                
+                // MOUSE EVENTS
+                root.addEventListener('mousedown', (e) => { isActive = true; updateSlider(e.clientX); });
+                window.addEventListener('mouseup', () => { isActive = false; });
+                window.addEventListener('mousemove', (e) => { updateSlider(e.clientX); });
+
+                // TOUCH EVENTS (Essential for Mobile swiping UX)
+                root.addEventListener('touchstart', (e) => { isActive = true; updateSlider(e.touches[0].clientX); });
+                window.addEventListener('touchend', () => { isActive = false; });
+                window.addEventListener('touchcancel', () => { isActive = false; });
+                // Note: passive: false is critical to prevent iOS inertial scrolling glitch
+                window.addEventListener('touchmove', (e) => { updateSlider(e.touches[0].clientX); }, { passive: false });
+            });
+        </script>
+        {% endif %}
+
+    </div>
+
+</body>
+</html>
